@@ -209,4 +209,105 @@ mod tests {
         let matcher = NotRegexMatcher::new("service", pattern);
         assert!(matcher.matches(&labels));
     }
+
+    /// Test edge cases with empty and nonexistent labels.
+    #[test]
+    fn test_edge_cases() {
+        let empty_labels: Vec<Label> = vec![];
+        let labels_with_empty = vec![Label::new("", ""), Label::new("key", "")];
+
+        // Test with empty labels array
+        let matcher = EqualMatcher::new("job", "api");
+        assert!(!matcher.matches(&empty_labels));
+
+        let matcher = NotEqualMatcher::new("job", "api");
+        assert!(matcher.matches(&empty_labels)); // Should match since no label equals "job=api"
+
+        // Test with empty label names/values
+        let matcher = EqualMatcher::new("", "");
+        assert!(matcher.matches(&labels_with_empty));
+
+        let matcher = EqualMatcher::new("key", "");
+        assert!(matcher.matches(&labels_with_empty));
+
+        // Test nonexistent label
+        let normal_labels = vec![Label::new("job", "api")];
+        let matcher = EqualMatcher::new("nonexistent", "value");
+        assert!(!matcher.matches(&normal_labels));
+    }
+
+    /// Test label_name method for all matcher types.
+    #[test]
+    fn test_label_name_methods() {
+        let equal_matcher = EqualMatcher::new("test_label", "value");
+        assert_eq!(equal_matcher.label_name(), "test_label");
+
+        let not_equal_matcher = NotEqualMatcher::new("another_label", "value");
+        assert_eq!(not_equal_matcher.label_name(), "another_label");
+
+        let pattern = Regex::new(r".*").expect("valid regex");
+        let regex_matcher = RegexMatcher::new("regex_label", pattern);
+        assert_eq!(regex_matcher.label_name(), "regex_label");
+
+        let pattern = Regex::new(r".*").expect("valid regex");
+        let not_regex_matcher = NotRegexMatcher::new("not_regex_label", pattern);
+        assert_eq!(not_regex_matcher.label_name(), "not_regex_label");
+    }
+
+    /// Test complex regex patterns and special cases.
+    #[test]
+    fn test_complex_regex_patterns() {
+        let labels = vec![
+            Label::new("version", "v1.2.3"),
+            Label::new("environment", "production"),
+            Label::new("special", "test@domain.com"),
+        ];
+
+        // Test version pattern
+        let version_pattern = Regex::new(r"^v\d+\.\d+\.\d+$").expect("valid regex");
+        let matcher = RegexMatcher::new("version", version_pattern);
+        assert!(matcher.matches(&labels));
+
+        // Test email pattern
+        let email_pattern = Regex::new(r".*@.*\.com$").expect("valid regex");
+        let matcher = RegexMatcher::new("special", email_pattern);
+        assert!(matcher.matches(&labels));
+
+        // Test not-regex with non-matching pattern
+        let non_matching_pattern = Regex::new(r"^staging.*").expect("valid regex");
+        let matcher = NotRegexMatcher::new("environment", non_matching_pattern);
+        assert!(matcher.matches(&labels)); // Should match since environment != "staging*"
+
+        // Test not-regex with matching pattern
+        let matching_pattern = Regex::new(r"^prod.*").expect("valid regex");
+        let matcher = NotRegexMatcher::new("environment", matching_pattern);
+        assert!(!matcher.matches(&labels)); // Should not match since environment = "production"
+    }
+
+    /// Test multiple labels with same name (edge case).
+    #[test]
+    fn test_duplicate_label_names() {
+        let labels = vec![
+            Label::new("tag", "first"),
+            Label::new("tag", "second"),
+            Label::new("other", "value"),
+        ];
+
+        // Equal matcher should match if any label with the name matches
+        let matcher = EqualMatcher::new("tag", "first");
+        assert!(matcher.matches(&labels));
+
+        let matcher = EqualMatcher::new("tag", "second");
+        assert!(matcher.matches(&labels));
+
+        let matcher = EqualMatcher::new("tag", "third");
+        assert!(!matcher.matches(&labels));
+
+        // Not-equal matcher should not match if ANY label with the name matches
+        let matcher = NotEqualMatcher::new("tag", "first");
+        assert!(!matcher.matches(&labels)); // Should not match because one "tag" equals "first"
+
+        let matcher = NotEqualMatcher::new("tag", "third");
+        assert!(matcher.matches(&labels)); // Should match because no "tag" equals "third"
+    }
 }

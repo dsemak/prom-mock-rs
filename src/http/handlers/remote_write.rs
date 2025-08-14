@@ -106,6 +106,15 @@ fn handle_remote_write_impl(
 
 #[cfg(test)]
 mod tests {
+    use axum::body::Bytes;
+    use axum::extract::State;
+    use axum::http::{HeaderMap, HeaderValue};
+    use std::sync::Arc;
+
+    use crate::fixtures::FixtureBook;
+    use crate::http::state::AppState;
+    use crate::storage::{MemoryStorage, Storage};
+
     use super::*;
 
     /// Test protobuf encoding and decoding of remote write messages.
@@ -131,5 +140,197 @@ mod tests {
         let decoded = WriteRequest::decode(buf.as_slice()).expect("just encoded valid data");
         assert_eq!(decoded.timeseries.len(), 1);
         assert_eq!(decoded.timeseries[0].samples[0].value, 42.0);
+    }
+
+    /// Test remote_write handler with valid protobuf data.
+    #[tokio::test]
+    async fn test_remote_write_handler_success() {
+        let storage = Arc::new(MemoryStorage::new());
+        let state = AppState::builder()
+            .with_storage(storage.clone())
+            .with_fixtures(FixtureBook::default())
+            .build()
+            .expect("valid configuration");
+
+        // Create test write request
+        let write_request = WriteRequest {
+            timeseries: vec![TimeSeries {
+                labels: vec![
+                    Label { name: "__name__".to_string(), value: "test_metric".to_string() },
+                    Label { name: "job".to_string(), value: "test".to_string() },
+                ],
+                samples: vec![Sample { timestamp: 1640995200000, value: 42.0 }],
+            }],
+        };
+
+        let mut buf = Vec::new();
+        write_request.encode(&mut buf).expect("encode protobuf");
+
+        let headers = HeaderMap::new();
+        let body = Bytes::from(buf);
+
+        let response = remote_write(State(state), headers, body).await;
+        let response = response.into_response();
+
+        assert_eq!(response.status(), axum::http::StatusCode::NO_CONTENT);
+
+        // Verify data was stored
+        let series = storage.query_series(&[]);
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].labels.len(), 2);
+        assert_eq!(series[0].samples.len(), 1);
+        assert_eq!(series[0].samples[0].value, 42.0);
+    }
+
+    /// Test remote_write handler with invalid protobuf data.
+    #[tokio::test]
+    async fn test_remote_write_handler_invalid_protobuf() {
+        let storage = Arc::new(MemoryStorage::new());
+        let state = AppState::builder()
+            .with_storage(storage)
+            .with_fixtures(FixtureBook::default())
+            .build()
+            .expect("valid configuration");
+
+        let headers = HeaderMap::new();
+        let body = Bytes::from("invalid protobuf data");
+
+        let response = remote_write(State(state), headers, body).await;
+        let response = response.into_response();
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    /// Test remote_write handler with snappy compression (not supported).
+    #[tokio::test]
+    async fn test_remote_write_handler_snappy_not_supported() {
+        let storage = Arc::new(MemoryStorage::new());
+        let state = AppState::builder()
+            .with_storage(storage)
+            .with_fixtures(FixtureBook::default())
+            .build()
+            .expect("valid configuration");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("content-encoding", HeaderValue::from_static("snappy"));
+        let body = Bytes::from("some data");
+
+        let response = remote_write(State(state), headers, body).await;
+        let response = response.into_response();
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    /// Test remote_write handler with error rate simulation.
+    #[tokio::test]
+    async fn test_remote_write_handler_with_error_simulation() {
+        let storage = Arc::new(MemoryStorage::new());
+        let state = AppState::builder()
+            .with_storage(storage)
+            .with_error_rate(1.0) // 100% error rate
+            .build()
+            .expect("valid configuration");
+
+        let headers = HeaderMap::new();
+        let body = Bytes::from("any data");
+
+        let response = remote_write(State(state), headers, body).await;
+        let response = response.into_response();
+
+        assert_eq!(response.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Test remote_write handler with multiple time series.
+    #[tokio::test]
+    async fn test_remote_write_handler_multiple_series() {
+        let storage = Arc::new(MemoryStorage::new());
+        let state = AppState::builder()
+            .with_storage(storage.clone())
+            .with_fixtures(FixtureBook::default())
+            .build()
+            .expect("valid configuration");
+
+        // Create write request with multiple series
+        let write_request = WriteRequest {
+            timeseries: vec![
+                TimeSeries {
+                    labels: vec![
+                        Label { name: "__name__".to_string(), value: "metric1".to_string() },
+                        Label { name: "job".to_string(), value: "test".to_string() },
+                    ],
+                    samples: vec![Sample { timestamp: 1640995200000, value: 10.0 }],
+                },
+                TimeSeries {
+                    labels: vec![
+                        Label { name: "__name__".to_string(), value: "metric2".to_string() },
+                        Label { name: "job".to_string(), value: "test".to_string() },
+                    ],
+                    samples: vec![
+                        Sample { timestamp: 1640995200000, value: 20.0 },
+                        Sample { timestamp: 1640995230000, value: 25.0 },
+                    ],
+                },
+            ],
+        };
+
+        let mut buf = Vec::new();
+        write_request.encode(&mut buf).expect("encode protobuf");
+
+        let headers = HeaderMap::new();
+        let body = Bytes::from(buf);
+
+        let response = remote_write(State(state), headers, body).await;
+        let response = response.into_response();
+
+        assert_eq!(response.status(), axum::http::StatusCode::NO_CONTENT);
+
+        // Verify both series were stored
+        let series = storage.query_series(&[]);
+        assert_eq!(series.len(), 2);
+
+        // Check first series
+        let series1 =
+            series.iter().find(|s| s.labels.iter().any(|l| l.value == "metric1")).unwrap();
+        assert_eq!(series1.samples.len(), 1);
+        assert_eq!(series1.samples[0].value, 10.0);
+
+        // Check second series
+        let series2 =
+            series.iter().find(|s| s.labels.iter().any(|l| l.value == "metric2")).unwrap();
+        assert_eq!(series2.samples.len(), 2);
+        assert_eq!(series2.samples[0].value, 20.0);
+        assert_eq!(series2.samples[1].value, 25.0);
+    }
+
+    /// Test handle_remote_write_impl function directly.
+    #[test]
+    fn test_handle_remote_write_impl_success() {
+        let storage: Arc<dyn FullStorage> = Arc::new(MemoryStorage::new());
+
+        let write_request = WriteRequest {
+            timeseries: vec![TimeSeries {
+                labels: vec![Label {
+                    name: "__name__".to_string(),
+                    value: "test_metric".to_string(),
+                }],
+                samples: vec![Sample { timestamp: 1640995200000, value: 42.0 }],
+            }],
+        };
+
+        let mut buf = Vec::new();
+        write_request.encode(&mut buf).expect("encode protobuf");
+
+        let headers = HeaderMap::new();
+        let body = Bytes::from(buf);
+
+        let response = handle_remote_write_impl(State(storage.clone()), &headers, body);
+        let response = response.into_response();
+
+        assert_eq!(response.status(), axum::http::StatusCode::NO_CONTENT);
+
+        // Verify data was stored
+        let series = storage.query_series(&[]);
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].samples[0].value, 42.0);
     }
 }

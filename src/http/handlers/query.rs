@@ -200,3 +200,264 @@ fn parse_time_param(param: &str, fixed_now: Option<time::OffsetDateTime>) -> i64
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::extract::{Query, State};
+
+    use crate::fixtures::FixtureBook;
+    use crate::http::state::AppState;
+    use crate::storage::{Label, MemoryStorage, Sample, Storage, TimeSeries};
+
+    use super::*;
+
+    fn create_test_state_with_data() -> AppState {
+        let storage = Arc::new(MemoryStorage::new());
+
+        // Add some test data
+        let mut ts = TimeSeries::new(vec![
+            Label::new("__name__".to_string(), "test_metric".to_string()),
+            Label::new("job".to_string(), "test".to_string()),
+        ]);
+
+        let now = time::OffsetDateTime::now_utc().unix_timestamp() * 1000;
+        ts.add_sample(Sample::new(now - 60000, 10.0)); // 1 minute ago
+        ts.add_sample(Sample::new(now - 30000, 15.0)); // 30 seconds ago
+        ts.add_sample(Sample::new(now, 20.0)); // now
+
+        storage.add_series(ts);
+
+        AppState::builder()
+            .with_storage(storage)
+            .with_fixtures(FixtureBook::default())
+            .build()
+            .expect("valid configuration")
+    }
+
+    fn create_test_state_empty() -> AppState {
+        let storage = Arc::new(MemoryStorage::new());
+        AppState::builder()
+            .with_storage(storage)
+            .with_fixtures(FixtureBook::default())
+            .build()
+            .expect("valid configuration")
+    }
+
+    /// Test query_simple with valid data.
+    #[tokio::test]
+    async fn test_query_simple_with_data() {
+        let state = create_test_state_with_data();
+        let params = QueryParams { query: "test_metric".to_string() };
+
+        let response = query_simple(State(state), Query(params)).await;
+        let response = response.into_response();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+
+    /// Test query_simple with empty storage.
+    #[tokio::test]
+    async fn test_query_simple_empty() {
+        let state = create_test_state_empty();
+        let params = QueryParams { query: "nonexistent_metric".to_string() };
+
+        let response = query_simple(State(state), Query(params)).await;
+        let response = response.into_response();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+
+    /// Test query_range_simple with valid data.
+    #[tokio::test]
+    async fn test_query_range_simple_with_data() {
+        let state = create_test_state_with_data();
+        let params = QueryRangeParams {
+            query: "test_metric".to_string(),
+            start: "1640995200".to_string(), // 2022-01-01 00:00:00 UTC
+            end: "1640998800".to_string(),   // 2022-01-01 01:00:00 UTC
+            step: "30s".to_string(),
+        };
+
+        let response = query_range_simple(State(state), Query(params)).await;
+        let response = response.into_response();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+
+    /// Test query_range_simple with empty storage.
+    #[tokio::test]
+    async fn test_query_range_simple_empty() {
+        let state = create_test_state_empty();
+        let params = QueryRangeParams {
+            query: "nonexistent_metric".to_string(),
+            start: "1640995200".to_string(),
+            end: "1640998800".to_string(),
+            step: "30s".to_string(),
+        };
+
+        let response = query_range_simple(State(state), Query(params)).await;
+        let response = response.into_response();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+
+    /// Test build_vector_response function.
+    #[test]
+    fn test_build_vector_response() {
+        let series = vec![crate::query_engine::QueryResultSeries {
+            labels: vec![
+                Label::new("__name__".to_string(), "test_metric".to_string()),
+                Label::new("job".to_string(), "test".to_string()),
+            ],
+            samples: vec![Sample::new(1640995200000, 42.0)],
+        }];
+
+        let result = crate::query_engine::QueryResult { series };
+        let (status, json) = build_vector_response(result, 1640995200000);
+
+        assert_eq!(status, axum::http::StatusCode::OK);
+
+        let value = json.0;
+        assert_eq!(value["status"], "success");
+        assert_eq!(value["data"]["resultType"], "vector");
+        assert!(value["data"]["result"].is_array());
+    }
+
+    /// Test build_matrix_response function.
+    #[test]
+    fn test_build_matrix_response() {
+        let series = vec![crate::query_engine::QueryResultSeries {
+            labels: vec![Label::new("__name__".to_string(), "test_metric".to_string())],
+            samples: vec![Sample::new(1640995200000, 10.0), Sample::new(1640995230000, 15.0)],
+        }];
+
+        let result = crate::query_engine::QueryResult { series };
+        let (status, json) = build_matrix_response(result);
+
+        assert_eq!(status, axum::http::StatusCode::OK);
+
+        let value = json.0;
+        assert_eq!(value["status"], "success");
+        assert_eq!(value["data"]["resultType"], "matrix");
+        assert!(value["data"]["result"].is_array());
+    }
+
+    /// Test build_error_response function.
+    #[test]
+    fn test_build_error_response() {
+        let error = std::io::Error::new(std::io::ErrorKind::InvalidInput, "test error");
+        let (status, json) = build_error_response(error);
+
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+
+        let value = json.0;
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["errorType"], "bad_data");
+        assert_eq!(value["error"], "test error");
+    }
+
+    /// Test build_labels_map function.
+    #[test]
+    fn test_build_labels_map() {
+        let labels = vec![
+            Label::new("__name__".to_string(), "test_metric".to_string()),
+            Label::new("job".to_string(), "test".to_string()),
+        ];
+
+        let map = build_labels_map(&labels);
+
+        assert_eq!(map.len(), 2);
+        assert_eq!(map["__name__"], serde_json::Value::String("test_metric".to_string()));
+        assert_eq!(map["job"], serde_json::Value::String("test".to_string()));
+    }
+
+    /// Test build_instant_value function.
+    #[test]
+    fn test_build_instant_value() {
+        let samples = vec![Sample::new(1640995200000, 10.0), Sample::new(1640995230000, 15.0)];
+
+        let value = build_instant_value(&samples, 1640995260000);
+
+        // Should use the last sample
+        let array = value.as_array().expect("should be array");
+        assert_eq!(array.len(), 2);
+        assert_eq!(array[0], serde_json::Value::Number(1640995230.into()));
+        assert_eq!(array[1], serde_json::Value::String("15".to_string()));
+    }
+
+    /// Test build_instant_value with empty samples.
+    #[test]
+    fn test_build_instant_value_empty() {
+        let samples = vec![];
+        let fallback_timestamp = 1640995260000;
+
+        let value = build_instant_value(&samples, fallback_timestamp);
+
+        let array = value.as_array().expect("should be array");
+        assert_eq!(array.len(), 2);
+        assert_eq!(array[0], serde_json::Value::Number(1640995260.into()));
+        assert_eq!(array[1], serde_json::Value::String("0".to_string()));
+    }
+
+    /// Test build_range_values function.
+    #[test]
+    fn test_build_range_values() {
+        let samples = vec![Sample::new(1640995200000, 10.0), Sample::new(1640995230000, 15.0)];
+
+        let values = build_range_values(&samples);
+
+        assert_eq!(values.len(), 2);
+
+        let first = values[0].as_array().expect("should be array");
+        assert_eq!(first[0], serde_json::Value::Number(1640995200.into()));
+        assert_eq!(first[1], serde_json::Value::String("10".to_string()));
+
+        let second = values[1].as_array().expect("should be array");
+        assert_eq!(second[0], serde_json::Value::Number(1640995230.into()));
+        assert_eq!(second[1], serde_json::Value::String("15".to_string()));
+    }
+
+    /// Test build_sample_array function.
+    #[test]
+    fn test_build_sample_array() {
+        let value = build_sample_array(1640995200, 42.5);
+
+        let array = value.as_array().expect("should be array");
+        assert_eq!(array.len(), 2);
+        assert_eq!(array[0], serde_json::Value::Number(1640995200.into()));
+        assert_eq!(array[1], serde_json::Value::String("42.5".to_string()));
+    }
+
+    /// Test parse_time_param function.
+    #[test]
+    fn test_parse_time_param() {
+        // Test absolute timestamp
+        let result = parse_time_param("1640995200", None);
+        assert_eq!(result, 1640995200000); // converted to milliseconds
+
+        // Test invalid input (should default to 0)
+        let result = parse_time_param("invalid", None);
+        assert_eq!(result, 0);
+    }
+
+    /// Test query with error rate simulation.
+    #[tokio::test]
+    async fn test_query_simple_with_error_simulation() {
+        let storage = Arc::new(MemoryStorage::new());
+        let state = AppState::builder()
+            .with_storage(storage)
+            .with_error_rate(1.0) // 100% error rate
+            .build()
+            .expect("valid configuration");
+
+        let params = QueryParams { query: "test_metric".to_string() };
+
+        let response = query_simple(State(state), Query(params)).await;
+        let response = response.into_response();
+
+        // Should return SERVICE_UNAVAILABLE due to error simulation
+        assert_eq!(response.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    }
+}

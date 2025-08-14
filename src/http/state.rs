@@ -25,7 +25,7 @@ pub struct QueryConfig {
 ///
 /// Contains settings for simulating latency, errors, and fixture responses,
 /// separated from core query functionality.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct MockConfig {
     /// Fixture data for predefined responses
     pub fixtures: Arc<FixtureBook>,
@@ -247,5 +247,224 @@ impl AppStateBuilder {
         let error_rate = self.error_rate.unwrap_or(0.0);
 
         Ok(AppState::new(fixtures, self.fixed_now, latency, error_rate, storage))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use crate::fixtures::FixtureBook;
+    use crate::storage::MemoryStorage;
+
+    use super::*;
+
+    fn create_test_storage() -> Arc<dyn FullStorage> {
+        Arc::new(MemoryStorage::new())
+    }
+
+    /// Test QueryConfig creation and initialization.
+    #[test]
+    fn test_query_config_new() {
+        let storage = create_test_storage();
+        let fixed_now = Some(time::OffsetDateTime::now_utc());
+
+        let config = QueryConfig::new(storage.clone(), fixed_now);
+
+        assert!(Arc::ptr_eq(&config.storage, &storage));
+        assert_eq!(config.fixed_now, fixed_now);
+    }
+
+    /// Test MockConfig creation with all parameters.
+    #[test]
+    fn test_mock_config_new() {
+        let fixtures = FixtureBook::default();
+        let latency = Duration::from_millis(100);
+        let error_rate = 0.5;
+        let fixed_now = Some(time::OffsetDateTime::now_utc());
+
+        let config = MockConfig::new(fixtures.clone(), latency, error_rate, fixed_now);
+
+        assert_eq!(config.latency, latency);
+        assert_eq!(config.error_rate, error_rate);
+        assert_eq!(config.fixed_now, fixed_now);
+    }
+
+    /// Test AppState creation with valid parameters.
+    #[test]
+    fn test_app_state_new() {
+        let fixtures = FixtureBook::default();
+        let storage = create_test_storage();
+        let fixed_now = Some(time::OffsetDateTime::now_utc());
+        let latency = Duration::from_millis(50);
+        let error_rate = 0.1;
+
+        let state = AppState::new(fixtures, fixed_now, latency, error_rate, storage);
+
+        assert_eq!(state.mock.latency, latency);
+        assert_eq!(state.mock.error_rate, error_rate);
+        assert_eq!(state.mock.fixed_now, fixed_now);
+        assert_eq!(state.query.fixed_now, fixed_now);
+    }
+
+    /// Test AppStateBuilder default creation.
+    #[test]
+    fn test_app_state_builder_new() {
+        let builder = AppStateBuilder::new();
+        assert!(builder.storage.is_none());
+        assert!(builder.fixtures.is_none());
+        assert!(builder.fixed_now.is_none());
+        assert!(builder.latency.is_none());
+        assert!(builder.error_rate.is_none());
+    }
+
+    /// Test AppStateBuilder with_storage.
+    #[test]
+    fn test_app_state_builder_with_storage() {
+        let storage = create_test_storage();
+        let builder = AppStateBuilder::new().with_storage(storage.clone());
+
+        assert!(builder.storage.is_some());
+        assert!(Arc::ptr_eq(builder.storage.as_ref().unwrap(), &storage));
+    }
+
+    /// Test AppStateBuilder with_fixtures.
+    #[test]
+    fn test_app_state_builder_with_fixtures() {
+        let fixtures = FixtureBook::default();
+        let builder = AppStateBuilder::new().with_fixtures(fixtures.clone());
+
+        assert!(builder.fixtures.is_some());
+    }
+
+    /// Test AppStateBuilder with_fixed_now.
+    #[test]
+    fn test_app_state_builder_with_fixed_now() {
+        let now = time::OffsetDateTime::now_utc();
+        let builder = AppStateBuilder::new().with_fixed_now(now);
+
+        assert_eq!(builder.fixed_now, Some(now));
+    }
+
+    /// Test AppStateBuilder with_latency.
+    #[test]
+    fn test_app_state_builder_with_latency() {
+        let latency = Duration::from_millis(200);
+        let builder = AppStateBuilder::new().with_latency(latency);
+
+        assert_eq!(builder.latency, Some(latency));
+    }
+
+    /// Test AppStateBuilder with_error_rate.
+    #[test]
+    fn test_app_state_builder_with_error_rate() {
+        let error_rate = 0.3;
+        let builder = AppStateBuilder::new().with_error_rate(error_rate);
+
+        assert_eq!(builder.error_rate, Some(error_rate));
+    }
+
+    /// Test AppStateBuilder successful build.
+    #[test]
+    fn test_app_state_builder_build_success() {
+        let storage = create_test_storage();
+        let fixtures = FixtureBook::default();
+        let now = time::OffsetDateTime::now_utc();
+        let latency = Duration::from_millis(100);
+        let error_rate = 0.2;
+
+        let result = AppStateBuilder::new()
+            .with_storage(storage)
+            .with_fixtures(fixtures)
+            .with_fixed_now(now)
+            .with_latency(latency)
+            .with_error_rate(error_rate)
+            .build();
+
+        assert!(result.is_ok());
+        let state = result.unwrap();
+        assert_eq!(state.mock.latency, latency);
+        assert_eq!(state.mock.error_rate, error_rate);
+        assert_eq!(state.mock.fixed_now, Some(now));
+    }
+
+    /// Test AppStateBuilder build without storage - should fail.
+    #[test]
+    fn test_app_state_builder_build_missing_storage() {
+        let result = AppStateBuilder::new().build();
+
+        assert!(result.is_err());
+        if let Err(error) = result {
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains("Storage is required"));
+        }
+    }
+
+    /// Test AppStateBuilder build with invalid error rate - should fail.
+    #[test]
+    fn test_app_state_builder_build_invalid_error_rate() {
+        let storage = create_test_storage();
+
+        // Test error rate > 1.0
+        let result =
+            AppStateBuilder::new().with_storage(storage.clone()).with_error_rate(1.5).build();
+
+        assert!(result.is_err());
+        if let Err(error) = result {
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains("Error rate must be between 0.0 and 1.0"));
+        }
+
+        // Test error rate < 0.0
+        let result = AppStateBuilder::new().with_storage(storage).with_error_rate(-0.1).build();
+
+        assert!(result.is_err());
+        if let Err(error) = result {
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains("Error rate must be between 0.0 and 1.0"));
+        }
+    }
+
+    /// Test AppStateBuilder build with defaults.
+    #[test]
+    fn test_app_state_builder_build_with_defaults() {
+        let storage = create_test_storage();
+
+        let result = AppStateBuilder::new().with_storage(storage).build();
+
+        assert!(result.is_ok());
+        let state = result.unwrap();
+        assert_eq!(state.mock.latency, Duration::ZERO);
+        assert_eq!(state.mock.error_rate, 0.0);
+        assert_eq!(state.mock.fixed_now, None);
+    }
+
+    /// Test AppState builder method.
+    #[test]
+    fn test_app_state_builder_method() {
+        let builder = AppState::builder();
+        assert!(builder.storage.is_none());
+    }
+
+    /// Test method chaining with builder.
+    #[test]
+    fn test_app_state_builder_chaining() {
+        let storage = create_test_storage();
+        let now = time::OffsetDateTime::now_utc();
+
+        let result = AppState::builder()
+            .with_storage(storage)
+            .with_latency(Duration::from_millis(50))
+            .with_error_rate(0.1)
+            .with_fixed_now(now)
+            .with_fixtures(FixtureBook::default())
+            .build();
+
+        assert!(result.is_ok());
+        let state = result.unwrap();
+        assert_eq!(state.mock.latency, Duration::from_millis(50));
+        assert_eq!(state.mock.error_rate, 0.1);
+        assert_eq!(state.mock.fixed_now, Some(now));
     }
 }

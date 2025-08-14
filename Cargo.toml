@@ -32,6 +32,10 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 [build-dependencies]
 prost-build = "0.12"
 
+[dev-dependencies]
+axum-test = "17.0"
+tempfile = "3.0"
+
 [lib]
 name = "prom_mock_rs"
 path = "src/lib.rs"

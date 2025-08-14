@@ -30,7 +30,7 @@ pub struct FixtureBook {
 }
 
 /// Default settings for fixture responses.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Defaults {
     /// Default status ("success" by default).
     pub status: Option<String>,
@@ -39,7 +39,7 @@ pub struct Defaults {
 }
 
 /// A route definition with matcher and response.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Route {
     /// Request matcher criteria.
     #[serde(rename = "match")]
@@ -49,7 +49,7 @@ pub struct Route {
 }
 
 /// Request matching criteria for a fixture route.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Matcher {
     /// API path (`/api/v1/query` or `/api/v1/query_range`).
     pub path: String,
@@ -64,7 +64,7 @@ pub struct Matcher {
 }
 
 /// Response data for a matched fixture route.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Respond {
     /// Response status (success/error).
     pub status: Option<String>,
@@ -202,4 +202,282 @@ pub struct QueryParams {
     pub start: Option<String>,
     pub end: Option<String>,
     pub step: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use serde_json::json;
+    use tempfile::NamedTempFile;
+    use time::macros::datetime;
+
+    use super::*;
+
+    /// Test basic FixtureBook creation and default values.
+    #[test]
+    fn test_fixture_book_defaults() {
+        let book = FixtureBook::default();
+        assert_eq!(book.version, None);
+        assert_eq!(book.defaults, None);
+        assert!(book.routes.is_empty());
+
+        // Test with defaults
+        let book = FixtureBook {
+            version: Some(1),
+            defaults: Some(Defaults {
+                status: Some("success".to_string()),
+                clock_anchor: Some("now".to_string()),
+            }),
+            routes: vec![],
+        };
+        assert_eq!(book.version, Some(1));
+        assert!(book.defaults.is_some());
+    }
+
+    /// Test loading FixtureBook from YAML with various configurations.
+    #[test]
+    fn test_load_from_yaml() {
+        // Test minimal YAML
+        let yaml_content = r#"
+version: 1
+routes: []
+"#;
+        let temp_file = NamedTempFile::new().expect("create temp file");
+        fs::write(&temp_file, yaml_content).expect("write temp file");
+
+        let book = FixtureBook::load_from_path(&temp_file).expect("load fixture book");
+        assert_eq!(book.version, Some(1));
+        assert!(book.routes.is_empty());
+        // Should have default status
+        assert_eq!(book.defaults.as_ref().unwrap().status.as_ref().unwrap(), "success");
+
+        // Test with explicit defaults
+        let yaml_content = r#"
+version: 1
+defaults:
+  status: "error"
+  clock_anchor: "2022-01-01T00:00:00Z"
+routes:
+  - match:
+      path: "/api/v1/query"
+      query: "up"
+    respond:
+      data: {"resultType": "vector", "result": []}
+"#;
+        let temp_file = NamedTempFile::new().expect("create temp file");
+        fs::write(&temp_file, yaml_content).expect("write temp file");
+
+        let book = FixtureBook::load_from_path(&temp_file).expect("load fixture book");
+        assert_eq!(book.version, Some(1));
+        assert_eq!(book.defaults.as_ref().unwrap().status.as_ref().unwrap(), "error");
+        assert_eq!(book.routes.len(), 1);
+        assert_eq!(book.routes[0].matcher.path, "/api/v1/query");
+        assert_eq!(book.routes[0].matcher.query.as_ref().unwrap(), "up");
+    }
+
+    /// Test invalid YAML handling.
+    #[test]
+    fn test_load_invalid_yaml() {
+        let yaml_content = "invalid: yaml: content: [";
+        let temp_file = NamedTempFile::new().expect("create temp file");
+        fs::write(&temp_file, yaml_content).expect("write temp file");
+
+        let result = FixtureBook::load_from_path(&temp_file);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), FixtureError::Yaml(_)));
+    }
+
+    /// Test file not found handling.
+    #[test]
+    fn test_load_nonexistent_file() {
+        let result = FixtureBook::load_from_path("/nonexistent/file.yaml");
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), FixtureError::Io(_)));
+    }
+
+    /// Test finding matches for simple queries.
+    #[test]
+    fn test_find_match_simple_query() {
+        let book = FixtureBook {
+            version: Some(1),
+            defaults: Some(Defaults { status: Some("success".to_string()), clock_anchor: None }),
+            routes: vec![
+                Route {
+                    matcher: Matcher {
+                        path: "/api/v1/query".to_string(),
+                        query: Some("up".to_string()),
+                        start: None,
+                        end: None,
+                        step: None,
+                    },
+                    respond: Respond {
+                        status: None,
+                        data: json!({"resultType": "vector", "result": []}),
+                        warnings: None,
+                        error_type: None,
+                        error: None,
+                    },
+                },
+                Route {
+                    matcher: Matcher {
+                        path: "/api/v1/query".to_string(),
+                        query: Some("cpu_usage".to_string()),
+                        start: None,
+                        end: None,
+                        step: None,
+                    },
+                    respond: Respond {
+                        status: Some("error".to_string()),
+                        data: json!({}),
+                        warnings: None,
+                        error_type: Some("execution".to_string()),
+                        error: Some("query failed".to_string()),
+                    },
+                },
+            ],
+        };
+
+        // Test matching query
+        let params = QueryParams { query: "up".to_string(), start: None, end: None, step: None };
+        let result = book.find_match("/api/v1/query", &params, None);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().data["resultType"], "vector");
+
+        // Test different query
+        let params =
+            QueryParams { query: "cpu_usage".to_string(), start: None, end: None, step: None };
+        let result = book.find_match("/api/v1/query", &params, None);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().status.as_ref().unwrap(), "error");
+
+        // Test non-matching query
+        let params =
+            QueryParams { query: "memory_usage".to_string(), start: None, end: None, step: None };
+        let result = book.find_match("/api/v1/query", &params, None);
+        assert!(result.is_none());
+
+        // Test wrong path
+        let params = QueryParams { query: "up".to_string(), start: None, end: None, step: None };
+        let result = book.find_match("/api/v1/query_range", &params, None);
+        assert!(result.is_none());
+    }
+
+    /// Test finding matches for query_range requests.
+    #[test]
+    fn test_find_match_query_range() {
+        let book = FixtureBook {
+            version: Some(1),
+            defaults: None,
+            routes: vec![Route {
+                matcher: Matcher {
+                    path: "/api/v1/query_range".to_string(),
+                    query: Some("up".to_string()),
+                    start: Some("now-1h".to_string()),
+                    end: Some("now".to_string()),
+                    step: Some("5m".to_string()),
+                },
+                respond: Respond {
+                    status: None,
+                    data: json!({"resultType": "matrix", "result": []}),
+                    warnings: None,
+                    error_type: None,
+                    error: None,
+                },
+            }],
+        };
+
+        let fixed_time = datetime!(2022-01-01 12:00:00 UTC);
+
+        // Test matching query_range
+        let params = QueryParams {
+            query: "up".to_string(),
+            start: Some("now-1h".to_string()),
+            end: Some("now".to_string()),
+            step: Some("5m".to_string()),
+        };
+        let result = book.find_match("/api/v1/query_range", &params, Some(fixed_time));
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().data["resultType"], "matrix");
+
+        // Test missing required parameters for query_range
+        let params = QueryParams {
+            query: "up".to_string(),
+            start: None,
+            end: Some("now".to_string()),
+            step: Some("5m".to_string()),
+        };
+        let result = book.find_match("/api/v1/query_range", &params, Some(fixed_time));
+        assert!(result.is_none());
+
+        // Test different step value
+        let params = QueryParams {
+            query: "up".to_string(),
+            start: Some("now-1h".to_string()),
+            end: Some("now".to_string()),
+            step: Some("1m".to_string()),
+        };
+        let result = book.find_match("/api/v1/query_range", &params, Some(fixed_time));
+        assert!(result.is_none());
+    }
+
+    /// Test effective_status method with defaults.
+    #[test]
+    fn test_effective_status() {
+        let book = FixtureBook {
+            version: None,
+            defaults: Some(Defaults {
+                status: Some("default_success".to_string()),
+                clock_anchor: None,
+            }),
+            routes: vec![],
+        };
+
+        // Response with explicit status
+        let respond = Respond {
+            status: Some("custom_status".to_string()),
+            data: json!({}),
+            warnings: None,
+            error_type: None,
+            error: None,
+        };
+        assert_eq!(book.effective_status(&respond), "custom_status");
+
+        // Response without explicit status (should use default)
+        let respond = Respond {
+            status: None,
+            data: json!({}),
+            warnings: None,
+            error_type: None,
+            error: None,
+        };
+        assert_eq!(book.effective_status(&respond), "default_success");
+
+        // Book without defaults
+        let book_no_defaults = FixtureBook::default();
+        assert_eq!(book_no_defaults.effective_status(&respond), "success");
+    }
+
+    /// Test param_equal function with various time formats.
+    #[test]
+    fn test_param_equal() {
+        let fixed_time = datetime!(2022-01-01 12:00:00 UTC);
+
+        // Exact string matches
+        assert!(param_equal("1640995200", "1640995200", None));
+        assert!(!param_equal("1640995200", "1640995300", None));
+
+        // Relative time comparisons
+        assert!(param_equal("now", "now", Some(fixed_time)));
+        assert!(param_equal("now-1h", "now-1h", Some(fixed_time)));
+        assert!(!param_equal("now-1h", "now-2h", Some(fixed_time)));
+
+        // Mixed absolute/relative should work if they resolve to same value
+        let timestamp_1h_ago = "1641034800"; // fixed_time - 1 hour
+        assert!(param_equal("now-1h", timestamp_1h_ago, Some(fixed_time)));
+
+        // Raw vs resolved types should not match
+        assert!(!param_equal("raw_string", "1640995200", Some(fixed_time)));
+        assert!(!param_equal("1640995200", "raw_string", Some(fixed_time)));
+    }
 }

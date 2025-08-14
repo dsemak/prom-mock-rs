@@ -283,4 +283,195 @@ mod tests {
         assert_eq!(result.series.len(), 1);
         assert_eq!(result.series[0].samples.len(), 2);
     }
+
+    /// Test parsing edge cases and error conditions.
+    #[test]
+    fn test_parse_edge_cases() {
+        // Empty selector (no metric name, no labels)
+        let result = SimpleQueryEngine::parse_selector("{}");
+        assert!(result.is_ok());
+        let selector = result.unwrap();
+        assert_eq!(selector.matchers.len(), 0);
+
+        // Only metric name, no labels
+        let result = SimpleQueryEngine::parse_selector("cpu_usage");
+        assert!(result.is_ok());
+        let selector = result.unwrap();
+        assert_eq!(selector.matchers.len(), 1);
+        assert_eq!(selector.matchers[0].label_name(), "__name__");
+
+        // Empty metric name with labels
+        let result = SimpleQueryEngine::parse_selector(r#"{job="api"}"#);
+        assert!(result.is_ok());
+        let selector = result.unwrap();
+        assert_eq!(selector.matchers.len(), 1);
+        assert_eq!(selector.matchers[0].label_name(), "job");
+
+        // Whitespace handling
+        let result = SimpleQueryEngine::parse_selector(r#"  cpu_usage  { job = "api" }  "#);
+        assert!(result.is_ok());
+        let selector = result.unwrap();
+        assert_eq!(selector.matchers.len(), 2);
+    }
+
+    /// Test invalid label syntax error cases.
+    #[test]
+    fn test_parse_error_cases() {
+        // Invalid label syntax - missing closing brace
+        let result = SimpleQueryEngine::parse_selector(r#"metric{job="api""#);
+        assert!(result.is_err());
+
+        // Invalid label syntax - missing opening brace
+        let result = SimpleQueryEngine::parse_label_matchers(r#"job="api"}"#);
+        assert!(result.is_err());
+
+        // Invalid quoted value
+        let result = SimpleQueryEngine::parse_quoted_value("unquoted");
+        assert!(result.is_err());
+
+        // Invalid quoted value - missing closing quote
+        let result = SimpleQueryEngine::parse_quoted_value(r#""missing_close"#);
+        assert!(result.is_err());
+
+        // Invalid label matcher - no operator
+        let result = SimpleQueryEngine::parse_single_label_matcher("invalid_syntax");
+        assert!(result.is_err());
+
+        // Invalid regex pattern
+        let result = SimpleQueryEngine::parse_single_label_matcher(r#"test=~"[invalid""#);
+        assert!(result.is_err());
+    }
+
+    /// Test regex matchers (=~ and !~).
+    #[test]
+    fn test_regex_matchers() {
+        // Valid regex matcher
+        let result = SimpleQueryEngine::parse_single_label_matcher(r#"instance=~"server.*""#);
+        assert!(result.is_ok());
+        let matcher = result.unwrap();
+        assert_eq!(matcher.label_name(), "instance");
+
+        let labels = vec![crate::storage::Label::new("instance", "server1")];
+        assert!(matcher.matches(&labels));
+
+        let labels = vec![crate::storage::Label::new("instance", "client1")];
+        assert!(!matcher.matches(&labels));
+
+        // Valid not-regex matcher
+        let result = SimpleQueryEngine::parse_single_label_matcher(r#"method!~"POST|PUT""#);
+        assert!(result.is_ok());
+        let matcher = result.unwrap();
+        assert_eq!(matcher.label_name(), "method");
+
+        let labels = vec![crate::storage::Label::new("method", "GET")];
+        assert!(matcher.matches(&labels));
+
+        let labels = vec![crate::storage::Label::new("method", "POST")];
+        assert!(!matcher.matches(&labels));
+    }
+
+    /// Test complex label expression splitting with quotes and escapes.
+    #[test]
+    fn test_complex_label_splitting() {
+        // Test with escaped quotes
+        let parts =
+            SimpleQueryEngine::split_label_expressions(r#"a="value with \"quotes\"",b="normal""#);
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], r#"a="value with \"quotes\"""#);
+        assert_eq!(parts[1], r#"b="normal""#);
+
+        // Test with commas inside quotes
+        let parts = SimpleQueryEngine::split_label_expressions(
+            r#"description="contains, comma",job="api""#,
+        );
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], r#"description="contains, comma""#);
+        assert_eq!(parts[1], r#"job="api""#);
+
+        // Test with empty parts
+        let parts = SimpleQueryEngine::split_label_expressions("");
+        assert_eq!(parts.len(), 0);
+
+        // Test single expression
+        let parts = SimpleQueryEngine::split_label_expressions(r#"job="api""#);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0], r#"job="api""#);
+    }
+
+    /// Test query with time filtering.
+    #[test]
+    fn test_query_with_time_filtering() {
+        let storage = Arc::new(MemoryStorage::new());
+        let engine = SimpleQueryEngine::new(storage.clone());
+
+        // Add test data with different timestamps
+        let labels = vec![Label::new("__name__", "cpu_usage"), Label::new("job", "api")];
+        let mut ts = TimeSeries::new(labels);
+        ts.add_sample(Sample::new(1000, 10.0));
+        ts.add_sample(Sample::new(2000, 20.0));
+        ts.add_sample(Sample::new(3000, 30.0));
+        ts.add_sample(Sample::new(4000, 40.0));
+        storage.add_series(ts);
+
+        // Query with time range that excludes some samples
+        let result = engine.query("cpu_usage", 1500, 3500).expect("valid query");
+        assert_eq!(result.series.len(), 1);
+        assert_eq!(result.series[0].samples.len(), 2); // Only samples at 2000 and 3000
+        assert_eq!(result.series[0].samples[0].timestamp, 2000);
+        assert_eq!(result.series[0].samples[1].timestamp, 3000);
+
+        // Query with no matches in time range
+        let result = engine.query("cpu_usage", 5000, 6000).expect("valid query");
+        assert_eq!(result.series.len(), 0); // No samples in range, so no series
+    }
+
+    /// Test query with complex selector and multiple series.
+    #[test]
+    fn test_complex_query() {
+        let storage = Arc::new(MemoryStorage::new());
+        let engine = SimpleQueryEngine::new(storage.clone());
+
+        // Add multiple series
+        storage.add_series({
+            let mut ts = TimeSeries::new(vec![
+                Label::new("__name__", "http_requests"),
+                Label::new("job", "api"),
+                Label::new("method", "GET"),
+            ]);
+            ts.add_sample(Sample::new(1000, 10.0));
+            ts
+        });
+
+        storage.add_series({
+            let mut ts = TimeSeries::new(vec![
+                Label::new("__name__", "http_requests"),
+                Label::new("job", "api"),
+                Label::new("method", "POST"),
+            ]);
+            ts.add_sample(Sample::new(1000, 5.0));
+            ts
+        });
+
+        storage.add_series({
+            let mut ts = TimeSeries::new(vec![
+                Label::new("__name__", "http_requests"),
+                Label::new("job", "web"),
+                Label::new("method", "GET"),
+            ]);
+            ts.add_sample(Sample::new(1000, 15.0));
+            ts
+        });
+
+        // Query with multiple matchers
+        let result = engine
+            .query(r#"http_requests{job="api",method!="POST"}"#, 0, 2000)
+            .expect("valid query");
+        assert_eq!(result.series.len(), 1); // Only the API GET requests
+        assert_eq!(result.series[0].samples[0].value, 10.0);
+
+        // Query with regex matcher
+        let result =
+            engine.query(r#"http_requests{job=~".*api.*"}"#, 0, 2000).expect("valid query");
+        assert_eq!(result.series.len(), 2); // Both API series (GET and POST)
+    }
 }

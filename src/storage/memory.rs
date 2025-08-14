@@ -112,7 +112,9 @@ impl Storage for MemoryStorage {
 impl MetadataStorage for MemoryStorage {
     fn label_names(&self) -> Vec<String> {
         let index = self.label_index.read().unwrap();
-        index.keys().cloned().collect()
+        let mut names: Vec<String> = index.keys().cloned().collect();
+        names.sort();
+        names
     }
 
     fn label_values(&self, name: &str) -> Vec<String> {
@@ -194,6 +196,149 @@ mod tests {
 
         let wrong_matcher = Arc::new(EqualMatcher::new("job", "web"));
         let results = storage.query_series(&[wrong_matcher]);
+        assert_eq!(results.len(), 0);
+    }
+
+    /// Test metadata operations with multiple series and edge cases.
+    #[test]
+    fn test_metadata_operations() {
+        let storage = MemoryStorage::new();
+
+        // Initially empty
+        assert!(storage.label_names().is_empty());
+        assert!(storage.label_values("nonexistent").is_empty());
+
+        // Add first series
+        let labels1 = vec![
+            Label::new("__name__", "cpu_usage"),
+            Label::new("job", "api"),
+            Label::new("instance", "server1"),
+        ];
+        storage.add_series(TimeSeries::new(labels1));
+
+        // Add second series with overlapping and new labels
+        let labels2 = vec![
+            Label::new("__name__", "memory_usage"),
+            Label::new("job", "web"),
+            Label::new("instance", "server1"),
+            Label::new("region", "us-west"),
+        ];
+        storage.add_series(TimeSeries::new(labels2));
+
+        // Test label names (should be sorted)
+        let names = storage.label_names();
+        assert_eq!(names, vec!["__name__", "instance", "job", "region"]);
+
+        // Test label values for each label
+        let name_values = storage.label_values("__name__");
+        assert_eq!(name_values, vec!["cpu_usage", "memory_usage"]);
+
+        let job_values = storage.label_values("job");
+        assert_eq!(job_values, vec!["api", "web"]);
+
+        let instance_values = storage.label_values("instance");
+        assert_eq!(instance_values, vec!["server1"]);
+
+        let region_values = storage.label_values("region");
+        assert_eq!(region_values, vec!["us-west"]);
+
+        // Test nonexistent label
+        assert!(storage.label_values("nonexistent").is_empty());
+    }
+
+    /// Test series merging when adding series with same labels.
+    #[test]
+    fn test_series_merging() {
+        let storage = MemoryStorage::new();
+
+        let labels = vec![Label::new("__name__", "requests_total"), Label::new("job", "api")];
+
+        // Add first series with some samples
+        let mut ts1 = TimeSeries::new(labels.clone());
+        ts1.add_sample(Sample::new(1000, 10.0));
+        ts1.add_sample(Sample::new(2000, 20.0));
+        storage.add_series(ts1);
+
+        // Add second series with same labels but different samples
+        let mut ts2 = TimeSeries::new(labels.clone());
+        ts2.add_sample(Sample::new(3000, 30.0));
+        ts2.add_sample(Sample::new(1500, 15.0)); // Between existing samples
+        ts2.add_sample(Sample::new(2000, 25.0)); // Should replace existing sample
+        storage.add_series(ts2);
+
+        // Should still have only one series
+        let series = storage.query_series(&[]);
+        assert_eq!(series.len(), 1);
+
+        // Check merged samples
+        let merged_series = &series[0];
+        assert_eq!(merged_series.samples.len(), 4);
+
+        // Should be sorted by timestamp
+        assert_eq!(merged_series.samples[0].timestamp, 1000);
+        assert_eq!(merged_series.samples[0].value, 10.0);
+
+        assert_eq!(merged_series.samples[1].timestamp, 1500);
+        assert_eq!(merged_series.samples[1].value, 15.0);
+
+        assert_eq!(merged_series.samples[2].timestamp, 2000);
+        assert_eq!(merged_series.samples[2].value, 25.0); // Updated value
+
+        assert_eq!(merged_series.samples[3].timestamp, 3000);
+        assert_eq!(merged_series.samples[3].value, 30.0);
+    }
+
+    /// Test complex queries with multiple matchers.
+    #[test]
+    fn test_complex_queries() {
+        let storage = MemoryStorage::new();
+
+        // Add multiple series
+        storage.add_series(TimeSeries::new(vec![
+            Label::new("__name__", "http_requests"),
+            Label::new("job", "api"),
+            Label::new("method", "GET"),
+        ]));
+
+        storage.add_series(TimeSeries::new(vec![
+            Label::new("__name__", "http_requests"),
+            Label::new("job", "api"),
+            Label::new("method", "POST"),
+        ]));
+
+        storage.add_series(TimeSeries::new(vec![
+            Label::new("__name__", "http_requests"),
+            Label::new("job", "web"),
+            Label::new("method", "GET"),
+        ]));
+
+        storage.add_series(TimeSeries::new(vec![
+            Label::new("__name__", "cpu_usage"),
+            Label::new("job", "api"),
+        ]));
+
+        // Query with multiple matchers (AND operation)
+        let matchers: Vec<Arc<dyn LabelMatcher>> = vec![
+            Arc::new(EqualMatcher::new("__name__", "http_requests")),
+            Arc::new(EqualMatcher::new("job", "api")),
+        ];
+        let results = storage.query_series(&matchers);
+        assert_eq!(results.len(), 2); // Only API HTTP requests
+
+        // Query excluding specific method
+        let matchers: Vec<Arc<dyn LabelMatcher>> = vec![
+            Arc::new(EqualMatcher::new("__name__", "http_requests")),
+            Arc::new(NotEqualMatcher::new("method", "POST")),
+        ];
+        let results = storage.query_series(&matchers);
+        assert_eq!(results.len(), 2); // HTTP requests excluding POST
+
+        // Query with no matches
+        let matchers: Vec<Arc<dyn LabelMatcher>> = vec![
+            Arc::new(EqualMatcher::new("__name__", "http_requests")),
+            Arc::new(EqualMatcher::new("job", "nonexistent")),
+        ];
+        let results = storage.query_series(&matchers);
         assert_eq!(results.len(), 0);
     }
 }
