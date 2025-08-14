@@ -26,7 +26,7 @@ pub fn build_router(state: AppState) -> Router {
         // Additional Prometheus API endpoints
         .route("/api/v1/series", get(series))
         .route("/api/v1/labels", get(labels))
-        .route("/api/v1/label/:name/values", get(label_values))
+        .route("/api/v1/label/{name}/values", get(label_values))
         // Remote Write API
         .route("/api/v1/write", post(remote_write))
         // Query API with in-memory storage fallback

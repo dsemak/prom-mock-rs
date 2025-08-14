@@ -11,7 +11,7 @@ categories = ["development-tools::testing"]
 
 [dependencies]
 # External crates
-axum = "0.7"
+axum = "0.8.4"
 bytes = "1.4"
 clap = { version = "4", features = ["derive"] }
 fnv = "1.0"
