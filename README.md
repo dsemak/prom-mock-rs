@@ -18,17 +18,21 @@ This project provides a lightweight mock implementation of the Prometheus HTTP A
 
 ## Installation
 
+### Prerequisites
+
+This library requires Rust 1.76.0 or later.
+
 ### As a CLI tool
 
 ```bash
-cargo install --path .
+cargo install prom-mock-rs
 ```
 
 ### As a library dependency
 
 ```toml
 [dependencies]
-prom-mock-rs = "0.1"
+prom-mock-rs = "0.1.0"
 ```
 
 ## Usage
@@ -107,7 +111,7 @@ routes:
 cargo test
 
 # Run the CLI with development settings
-cargo run --bin prom-mock -- --listen 127.0.0.1:9090 --fixtures examples/fixtures.yaml
+cargo run --bin prom-mock -- --listen 127.0.0.1:9090 --fixtures tests/fixtures.yaml
 
 # Build the library
 cargo build
