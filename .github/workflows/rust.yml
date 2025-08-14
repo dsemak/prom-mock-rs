@@ -152,10 +152,13 @@ jobs:
         run: cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out xml
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v4
         with:
           file: cobertura.xml
+          token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
+          flags: unittests
+          name: codecov-umbrella
 
   build:
     name: Build & Test Binary
