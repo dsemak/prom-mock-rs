@@ -1,0 +1,6 @@
+msrv = "1.76.0"
+cognitive-complexity-threshold = 20
+type-complexity-threshold = 250
+too-many-arguments-threshold = 7
+disallowed-names = ["foo", "bar", "baz"]
+doc-valid-idents = ["UUID", "HTTP", "UTF-8"]
